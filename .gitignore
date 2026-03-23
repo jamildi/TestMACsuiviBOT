@@ -1,0 +1,6 @@
+.run/
+__pycache__/
+*.pyc
+uploads/
+shopify_bot_profile/
+dist-macos/

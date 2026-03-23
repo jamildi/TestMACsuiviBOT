@@ -1,0 +1,61 @@
+name: macOS Smoke Test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "shopify_pdf_bot_platform.py"
+      - "requirements_shopify_pdf_bot.txt"
+      - "packaging/macos/**"
+      - "scripts/build_macos_bundle.ps1"
+      - ".github/workflows/macos-smoke-test.yml"
+
+jobs:
+  smoke-test:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build app bundle structure
+        shell: pwsh
+        run: ./scripts/build_macos_bundle.ps1
+
+      - name: Launch app bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "dist-macos/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify"
+          BOT_NO_OPEN=1 "dist-macos/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify" > launcher.log 2>&1 &
+          echo $! > launcher.pid
+
+      - name: Wait for local server
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..180}; do
+            if curl -fsS "http://127.0.0.1:5000/" > /tmp/bot-home.html; then
+              echo "Server OK after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:5000/" | grep -q "BOT Suivi Shopify"
+
+      - name: Show launcher log
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cat launcher.log
+
+      - name: Stop launcher
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [[ -f launcher.pid ]]; then
+            kill "$(cat launcher.pid)" || true
+          fi
+          pkill -f "shopify_pdf_bot_platform.py" || true

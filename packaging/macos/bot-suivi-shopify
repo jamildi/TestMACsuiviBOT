@@ -1,0 +1,140 @@
+#!/bin/zsh
+set -euo pipefail
+
+APP_NAME="BOT Suivi Shopify"
+SUPPORT_DIR="$HOME/Library/Application Support/$APP_NAME"
+RUNTIME_DIR="$SUPPORT_DIR/runtime"
+DATA_DIR="$SUPPORT_DIR/data"
+LOG_DIR="$SUPPORT_DIR/logs"
+PLAYWRIGHT_BROWSERS_PATH="$SUPPORT_DIR/playwright-browsers"
+MAMBA_ROOT="$SUPPORT_DIR/micromamba-root"
+MAMBA_BIN="$SUPPORT_DIR/bin/micromamba"
+ENV_DIR="$SUPPORT_DIR/env"
+MARKER_FILE="$SUPPORT_DIR/install.sha256"
+SERVER_LOG="$LOG_DIR/server.log"
+PAYLOAD_DIR="$(cd "$(dirname "$0")/../Resources/payload" && pwd)"
+NO_OPEN="${BOT_NO_OPEN:-0}"
+
+show_alert() {
+  local message="$1"
+  if [[ "${CI:-}" == "true" || "$NO_OPEN" == "1" || ! -x /usr/bin/osascript ]]; then
+    echo "$APP_NAME: $message" >&2
+    return
+  fi
+  message="${message//\"/\\\"}"
+  /usr/bin/osascript <<EOF
+display alert "$APP_NAME" message "$message" as critical
+EOF
+}
+
+open_url() {
+  local url="$1"
+  if [[ "$NO_OPEN" == "1" || "${CI:-}" == "true" ]]; then
+    echo "URL_READY=$url"
+    return
+  fi
+  /usr/bin/open "$url"
+}
+
+ensure_directories() {
+  mkdir -p "$SUPPORT_DIR" "$DATA_DIR" "$LOG_DIR" "$PLAYWRIGHT_BROWSERS_PATH" "$MAMBA_ROOT"
+}
+
+sync_payload() {
+  local tmp_dir="$SUPPORT_DIR/runtime.tmp"
+  rm -rf "$tmp_dir"
+  mkdir -p "$tmp_dir"
+  /usr/bin/ditto "$PAYLOAD_DIR" "$tmp_dir"
+  rm -rf "$RUNTIME_DIR"
+  mv "$tmp_dir" "$RUNTIME_DIR"
+}
+
+download_micromamba() {
+  if [[ -x "$MAMBA_BIN" ]]; then
+    return
+  fi
+
+  local arch
+  arch="$(/usr/bin/uname -m)"
+  local channel=""
+  case "$arch" in
+    arm64) channel="osx-arm64" ;;
+    x86_64) channel="osx-64" ;;
+    *)
+      show_alert "Architecture Mac non prise en charge: $arch"
+      exit 1
+      ;;
+  esac
+
+  local tmp_dir
+  tmp_dir="$(/usr/bin/mktemp -d)"
+  mkdir -p "$SUPPORT_DIR/bin"
+  /usr/bin/curl -Ls "https://micro.mamba.pm/api/micromamba/${channel}/latest" | /usr/bin/tar -xj -C "$tmp_dir" bin/micromamba
+  mv "$tmp_dir/bin/micromamba" "$MAMBA_BIN"
+  chmod +x "$MAMBA_BIN"
+  rm -rf "$tmp_dir"
+}
+
+ensure_python_env() {
+  if [[ -x "$ENV_DIR/bin/python" ]]; then
+    return
+  fi
+  MAMBA_ROOT_PREFIX="$MAMBA_ROOT" "$MAMBA_BIN" create -y -p "$ENV_DIR" python=3.11 pip >/dev/null
+}
+
+install_runtime_dependencies() {
+  local state_hash
+  state_hash="$(
+    {
+      /usr/bin/shasum -a 256 "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt"
+      /usr/bin/shasum -a 256 "$RUNTIME_DIR/shopify_pdf_bot_platform.py"
+    } | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
+  )"
+
+  local current_hash=""
+  if [[ -f "$MARKER_FILE" ]]; then
+    current_hash="$(<"$MARKER_FILE")"
+  fi
+
+  if [[ "$current_hash" == "$state_hash" ]]; then
+    return
+  fi
+
+  "$ENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
+  "$ENV_DIR/bin/python" -m pip install -r "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt"
+  PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" "$ENV_DIR/bin/python" -m playwright install chromium
+  echo "$state_hash" > "$MARKER_FILE"
+}
+
+launch_server() {
+  if /usr/bin/curl -fsS "http://127.0.0.1:5000/" >/dev/null 2>&1; then
+    open_url "http://127.0.0.1:5000/"
+    exit 0
+  fi
+
+  BOT_DATA_DIR="$DATA_DIR" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+    /usr/bin/nohup "$ENV_DIR/bin/python" "$RUNTIME_DIR/shopify_pdf_bot_platform.py" >"$SERVER_LOG" 2>&1 &
+
+  for _ in {1..60}; do
+    if /usr/bin/curl -fsS "http://127.0.0.1:5000/" >/dev/null 2>&1; then
+      open_url "http://127.0.0.1:5000/"
+      exit 0
+    fi
+    /bin/sleep 1
+  done
+
+  show_alert "Le serveur local ne demarre pas. Le log va s'ouvrir."
+  /usr/bin/open -a TextEdit "$SERVER_LOG"
+  exit 1
+}
+
+main() {
+  ensure_directories
+  sync_payload
+  download_micromamba
+  ensure_python_env
+  install_runtime_dependencies
+  launch_server
+}
+
+main "$@"
