@@ -4,3 +4,4 @@ __pycache__/
 uploads/
 shopify_bot_profile/
 dist-macos/
+dist-windows/

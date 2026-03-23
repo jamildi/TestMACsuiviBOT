@@ -27,7 +27,7 @@ BOT_PROFILE_DIR = BASE_DIR / "shopify_bot_profile"
 BOT_PROFILE_DIR.mkdir(exist_ok=True)
 
 HOST = "127.0.0.1"
-PORT = 5000
+PORT = int(os.environ.get("BOT_PORT", "5000"))
 
 SEARCH_WAIT_MS = 2200
 ACTION_WAIT_MS = 1600

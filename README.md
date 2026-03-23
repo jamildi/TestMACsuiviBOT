@@ -34,3 +34,4 @@ Les dossiers suivants ne sont pas versionnes :
 - `shopify_bot_profile/`
 - `.run/`
 - `dist-macos/`
+- `dist-windows/`
