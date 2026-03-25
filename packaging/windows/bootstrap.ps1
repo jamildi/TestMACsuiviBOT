@@ -11,7 +11,7 @@ $BrowserDir = Join-Path $SupportDir "playwright-browsers"
 $MarkerFile = Join-Path $SupportDir "install.sha256"
 $ServerLog = Join-Path $LogDir "server.log"
 $PayloadDir = Join-Path $PSScriptRoot "payload"
-$Port = if ($env:BOT_PORT) { $env:BOT_PORT } else { "5000" }
+$Port = if ($env:BOT_PORT) { $env:BOT_PORT } else { "5010" }
 $NoOpen = $env:BOT_NO_OPEN -eq "1"
 
 function Write-Status([string]$Message) {
@@ -116,9 +116,13 @@ function Open-Url([string]$Url) {
     Start-Process $Url | Out-Null
 }
 
+function Get-ServerUrl {
+    return "http://127.0.0.1:{0}/" -f $Port
+}
+
 function Test-Server {
     try {
-        $response = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/" -f $Port) -UseBasicParsing -TimeoutSec 3
+        $response = Invoke-WebRequest -Uri (Get-ServerUrl) -UseBasicParsing -TimeoutSec 3
         return $response.StatusCode -eq 200
     } catch {
         return $false
@@ -127,7 +131,7 @@ function Test-Server {
 
 function Start-Server {
     if (Test-Server) {
-        Open-Url ("http://127.0.0.1:{0}/" -f $Port)
+        Open-Url (Get-ServerUrl)
         return
     }
 
@@ -146,7 +150,7 @@ function Start-Server {
     for ($i = 0; $i -lt 90; $i++) {
         Start-Sleep -Seconds 1
         if (Test-Server) {
-            Open-Url ("http://127.0.0.1:{0}/" -f $Port)
+            Open-Url (Get-ServerUrl)
             return
         }
     }
@@ -156,6 +160,10 @@ function Start-Server {
 
 try {
     Ensure-Directories
+    if (Test-Server) {
+        Open-Url (Get-ServerUrl)
+        exit 0
+    }
     Sync-Payload
     Ensure-Python
     Install-Dependencies

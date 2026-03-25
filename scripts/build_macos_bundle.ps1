@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $templateRoot = Join-Path $projectRoot "packaging\macos"
-$distRoot = Join-Path $projectRoot "dist-macos"
+$distRoot = Join-Path $projectRoot "02 - App Mac"
 $appRoot = Join-Path $distRoot "BOT Suivi Shopify.app"
 $contentsRoot = Join-Path $appRoot "Contents"
 $macOsRoot = Join-Path $contentsRoot "MacOS"

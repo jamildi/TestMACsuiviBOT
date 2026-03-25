@@ -1,5 +1,6 @@
-#!/bin/zsh
-set -euo pipefail
+#!/bin/bash
+# BOT Suivi Shopify v2.0.0 - Lanceur macOS
+# Ne PAS utiliser set -euo pipefail (trop strict, empêche le debug)
 
 APP_NAME="BOT Suivi Shopify"
 SUPPORT_DIR="$HOME/Library/Application Support/$APP_NAME"
@@ -7,24 +8,23 @@ RUNTIME_DIR="$SUPPORT_DIR/runtime"
 DATA_DIR="$SUPPORT_DIR/data"
 LOG_DIR="$SUPPORT_DIR/logs"
 PLAYWRIGHT_BROWSERS_PATH="$SUPPORT_DIR/playwright-browsers"
-MAMBA_ROOT="$SUPPORT_DIR/micromamba-root"
-MAMBA_BIN="$SUPPORT_DIR/bin/micromamba"
-ENV_DIR="$SUPPORT_DIR/env"
+ENV_DIR="$SUPPORT_DIR/venv"
 MARKER_FILE="$SUPPORT_DIR/install.sha256"
 SERVER_LOG="$LOG_DIR/server.log"
-PAYLOAD_DIR="$(cd "$(dirname "$0")/../Resources/payload" && pwd)"
+SETUP_LOG="$LOG_DIR/setup.log"
+PAYLOAD_DIR="$(cd "$(dirname "$0")/../Resources/payload" 2>/dev/null && pwd)"
+PORT="${BOT_PORT:-5010}"
 NO_OPEN="${BOT_NO_OPEN:-0}"
+
+# ── Fonctions utilitaires ──
 
 show_alert() {
   local message="$1"
-  if [[ "${CI:-}" == "true" || "$NO_OPEN" == "1" || ! -x /usr/bin/osascript ]]; then
-    echo "$APP_NAME: $message" >&2
-    return
+  echo "$APP_NAME: $message" >&2
+  if [[ "${CI:-}" != "true" && "$NO_OPEN" != "1" && -x /usr/bin/osascript ]]; then
+    message="${message//\"/\\\"}"
+    /usr/bin/osascript -e "display alert \"$APP_NAME\" message \"$message\" as critical" 2>/dev/null || true
   fi
-  message="${message//\"/\\\"}"
-  /usr/bin/osascript <<EOF
-display alert "$APP_NAME" message "$message" as critical
-EOF
 }
 
 open_url() {
@@ -33,107 +33,172 @@ open_url() {
     echo "URL_READY=$url"
     return
   fi
-  /usr/bin/open "$url"
+  /usr/bin/open "$url" 2>/dev/null || true
 }
 
+log_setup() {
+  echo "[$(date '+%H:%M:%S')] $1" | tee -a "$SETUP_LOG"
+}
+
+server_url() {
+  echo "http://127.0.0.1:${PORT}/"
+}
+
+# ── Installation ──
+
 ensure_directories() {
-  mkdir -p "$SUPPORT_DIR" "$DATA_DIR" "$LOG_DIR" "$PLAYWRIGHT_BROWSERS_PATH" "$MAMBA_ROOT"
+  mkdir -p "$SUPPORT_DIR" "$DATA_DIR" "$LOG_DIR" "$PLAYWRIGHT_BROWSERS_PATH" "$RUNTIME_DIR" 2>/dev/null
+  touch "$SETUP_LOG"
 }
 
 sync_payload() {
-  local tmp_dir="$SUPPORT_DIR/runtime.tmp"
-  rm -rf "$tmp_dir"
-  mkdir -p "$tmp_dir"
-  /usr/bin/ditto "$PAYLOAD_DIR" "$tmp_dir"
-  rm -rf "$RUNTIME_DIR"
-  mv "$tmp_dir" "$RUNTIME_DIR"
+  if [[ -z "$PAYLOAD_DIR" || ! -d "$PAYLOAD_DIR" ]]; then
+    show_alert "Dossier payload introuvable. L'application est peut-etre corrompue."
+    exit 1
+  fi
+  log_setup "Synchronisation du code..."
+  rm -rf "$RUNTIME_DIR.tmp" 2>/dev/null
+  mkdir -p "$RUNTIME_DIR.tmp"
+  cp -R "$PAYLOAD_DIR/"* "$RUNTIME_DIR.tmp/" 2>/dev/null
+  rm -rf "$RUNTIME_DIR" 2>/dev/null
+  mv "$RUNTIME_DIR.tmp" "$RUNTIME_DIR"
 }
 
-download_micromamba() {
-  if [[ -x "$MAMBA_BIN" ]]; then
-    return
-  fi
+find_python() {
+  # Chercher Python 3 sur le système
+  for cmd in python3 python; do
+    if command -v "$cmd" &>/dev/null; then
+      local ver
+      ver="$("$cmd" --version 2>&1)"
+      if [[ "$ver" == *"Python 3"* ]]; then
+        echo "$cmd"
+        return
+      fi
+    fi
+  done
 
-  local arch
-  arch="$(/usr/bin/uname -m)"
-  local channel=""
-  case "$arch" in
-    arm64) channel="osx-arm64" ;;
-    x86_64) channel="osx-64" ;;
-    *)
-      show_alert "Architecture Mac non prise en charge: $arch"
-      exit 1
-      ;;
-  esac
+  # Chercher dans les emplacements courants Mac
+  for path in \
+    "/usr/local/bin/python3" \
+    "/opt/homebrew/bin/python3" \
+    "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3" \
+    "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" \
+    "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"; do
+    if [[ -x "$path" ]]; then
+      echo "$path"
+      return
+    fi
+  done
 
-  local tmp_dir
-  tmp_dir="$(/usr/bin/mktemp -d)"
-  mkdir -p "$SUPPORT_DIR/bin"
-  /usr/bin/curl -Ls "https://micro.mamba.pm/api/micromamba/${channel}/latest" | /usr/bin/tar -xj -C "$tmp_dir" bin/micromamba
-  mv "$tmp_dir/bin/micromamba" "$MAMBA_BIN"
-  chmod +x "$MAMBA_BIN"
-  rm -rf "$tmp_dir"
+  return 1
 }
 
 ensure_python_env() {
   if [[ -x "$ENV_DIR/bin/python" ]]; then
     return
   fi
-  MAMBA_ROOT_PREFIX="$MAMBA_ROOT" "$MAMBA_BIN" create -y -p "$ENV_DIR" python=3.11 pip >/dev/null
+
+  log_setup "Recherche de Python 3..."
+  local python_cmd
+  python_cmd="$(find_python)"
+  if [[ -z "$python_cmd" ]]; then
+    show_alert "Python 3 est requis mais introuvable.\n\nPour l'installer :\n1. Ouvre le Terminal\n2. Tape : xcode-select --install\n   OU\n   brew install python3\n\nPuis relance l'application."
+    exit 1
+  fi
+
+  log_setup "Python trouve : $($python_cmd --version)"
+  log_setup "Creation de l'environnement virtuel..."
+  "$python_cmd" -m venv "$ENV_DIR" 2>>"$SETUP_LOG"
+  if [[ $? -ne 0 ]]; then
+    show_alert "Impossible de creer l'environnement Python.\nConsultez $SETUP_LOG"
+    exit 1
+  fi
+  log_setup "Environnement cree."
 }
 
-install_runtime_dependencies() {
-  local state_hash
-  state_hash="$(
-    {
-      /usr/bin/shasum -a 256 "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt"
-      /usr/bin/shasum -a 256 "$RUNTIME_DIR/shopify_pdf_bot_platform.py"
-    } | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
-  )"
+install_dependencies() {
+  # Vérifier si les dépendances sont à jour (hash des fichiers source)
+  local state_hash=""
+  if [[ -f "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt" && -f "$RUNTIME_DIR/shopify_pdf_bot_platform.py" ]]; then
+    state_hash="$(cat "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt" "$RUNTIME_DIR/shopify_pdf_bot_platform.py" | shasum -a 256 | awk '{print $1}')"
+  fi
 
   local current_hash=""
   if [[ -f "$MARKER_FILE" ]]; then
-    current_hash="$(<"$MARKER_FILE")"
+    current_hash="$(cat "$MARKER_FILE")"
   fi
 
-  if [[ "$current_hash" == "$state_hash" ]]; then
+  if [[ -n "$state_hash" && "$current_hash" == "$state_hash" ]]; then
+    log_setup "Dependances a jour."
     return
   fi
 
-  "$ENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
-  "$ENV_DIR/bin/python" -m pip install -r "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt"
-  PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" "$ENV_DIR/bin/python" -m playwright install chromium
+  log_setup "Installation des dependances Python..."
+  "$ENV_DIR/bin/python" -m pip install --upgrade pip >>"$SETUP_LOG" 2>&1
+  "$ENV_DIR/bin/python" -m pip install flask pypdf playwright openpyxl >>"$SETUP_LOG" 2>&1
+  if [[ $? -ne 0 ]]; then
+    # Fallback: essayer avec le requirements.txt
+    "$ENV_DIR/bin/python" -m pip install -r "$RUNTIME_DIR/requirements_shopify_pdf_bot.txt" >>"$SETUP_LOG" 2>&1
+  fi
+
+  log_setup "Installation de Chromium..."
+  PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" "$ENV_DIR/bin/python" -m playwright install chromium >>"$SETUP_LOG" 2>&1
+  if [[ $? -ne 0 ]]; then
+    show_alert "Impossible d'installer Chromium.\nConsultez $SETUP_LOG"
+    exit 1
+  fi
+
   echo "$state_hash" > "$MARKER_FILE"
+  log_setup "Installation terminee."
 }
 
 launch_server() {
-  if /usr/bin/curl -fsS "http://127.0.0.1:5000/" >/dev/null 2>&1; then
-    open_url "http://127.0.0.1:5000/"
+  # Vérifier si le serveur tourne déjà
+  if curl -fsS "$(server_url)" >/dev/null 2>&1; then
+    log_setup "Serveur deja en cours."
+    open_url "$(server_url)"
     exit 0
   fi
 
-  BOT_DATA_DIR="$DATA_DIR" PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
-    /usr/bin/nohup "$ENV_DIR/bin/python" "$RUNTIME_DIR/shopify_pdf_bot_platform.py" >"$SERVER_LOG" 2>&1 &
+  log_setup "Lancement du serveur..."
+  BOT_DATA_DIR="$DATA_DIR" \
+  PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+  BOT_PORT="$PORT" \
+    nohup "$ENV_DIR/bin/python" "$RUNTIME_DIR/shopify_pdf_bot_platform.py" >"$SERVER_LOG" 2>&1 &
 
-  for _ in {1..60}; do
-    if /usr/bin/curl -fsS "http://127.0.0.1:5000/" >/dev/null 2>&1; then
-      open_url "http://127.0.0.1:5000/"
+  # Attendre que le serveur démarre (max 60s)
+  for i in $(seq 1 60); do
+    if curl -fsS "$(server_url)" >/dev/null 2>&1; then
+      log_setup "Serveur demarre sur le port $PORT"
+      open_url "$(server_url)"
       exit 0
     fi
-    /bin/sleep 1
+    sleep 1
   done
 
-  show_alert "Le serveur local ne demarre pas. Le log va s'ouvrir."
-  /usr/bin/open -a TextEdit "$SERVER_LOG"
+  show_alert "Le serveur ne demarre pas.\nConsultez les logs :\n$SERVER_LOG\n$SETUP_LOG"
+  if [[ -x /usr/bin/open ]]; then
+    /usr/bin/open -a TextEdit "$SERVER_LOG" 2>/dev/null || true
+    /usr/bin/open -a TextEdit "$SETUP_LOG" 2>/dev/null || true
+  fi
   exit 1
 }
 
+# ── Main ──
+
 main() {
   ensure_directories
+  log_setup "=== Demarrage $APP_NAME ==="
+
+  # Si le serveur tourne déjà, juste ouvrir l'URL
+  if curl -fsS "$(server_url)" >/dev/null 2>&1; then
+    open_url "$(server_url)"
+    exit 0
+  fi
+
   sync_payload
-  download_micromamba
   ensure_python_env
-  install_runtime_dependencies
+  install_dependencies
   launch_server
 }
 

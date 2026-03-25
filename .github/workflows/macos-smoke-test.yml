@@ -13,6 +13,7 @@ on:
 jobs:
   smoke-test:
     runs-on: macos-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -22,40 +23,84 @@ jobs:
         shell: pwsh
         run: ./scripts/build_macos_bundle.ps1
 
+      - name: Verify bundle structure
+        shell: bash
+        run: |
+          echo "=== Bundle structure ==="
+          find "02 - App Mac/BOT Suivi Shopify.app" -type f | head -20
+          echo ""
+          echo "=== Launcher shebang ==="
+          head -3 "02 - App Mac/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify"
+          echo ""
+          echo "=== Checking for CRLF ==="
+          if grep -Pl '\r' "02 - App Mac/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify"; then
+            echo "ERROR: CRLF detected in launcher!"
+            exit 1
+          else
+            echo "OK: LF only"
+          fi
+
+      - name: Test bash syntax
+        shell: bash
+        run: bash -n "02 - App Mac/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify"
+
+      - name: Test Python syntax
+        shell: bash
+        run: python3 -m py_compile "02 - App Mac/BOT Suivi Shopify.app/Contents/Resources/payload/shopify_pdf_bot_platform.py"
+
       - name: Launch app bootstrap
         shell: bash
         run: |
-          set -euo pipefail
-          chmod +x "dist-macos/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify"
-          BOT_NO_OPEN=1 "dist-macos/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify" > launcher.log 2>&1 &
+          chmod +x "02 - App Mac/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify"
+          BOT_NO_OPEN=1 CI=true "02 - App Mac/BOT Suivi Shopify.app/Contents/MacOS/bot-suivi-shopify" > launcher.log 2>&1 &
           echo $! > launcher.pid
+          echo "Launcher PID: $(cat launcher.pid)"
 
       - name: Wait for local server
         shell: bash
         run: |
-          set -euo pipefail
-          for i in {1..180}; do
-            if curl -fsS "http://127.0.0.1:5000/" > /tmp/bot-home.html; then
+          for i in $(seq 1 180); do
+            if curl -fsS "http://127.0.0.1:5010/" > /dev/null 2>&1; then
               echo "Server OK after ${i}s"
               break
             fi
+            if [ "$i" -eq 180 ]; then
+              echo "TIMEOUT: server did not start in 180s"
+              exit 1
+            fi
             sleep 1
           done
-          curl -fsS "http://127.0.0.1:5000/" | grep -q "BOT Suivi Shopify"
+
+      - name: Verify server response
+        shell: bash
+        run: |
+          BODY=$(curl -fsS "http://127.0.0.1:5010/")
+          echo "$BODY" | grep -q "BOT Suivi Shopify" && echo "Homepage OK" || { echo "Homepage check FAILED"; exit 1; }
+          echo "$BODY" | grep -q "v2.0.0" && echo "Version OK" || { echo "Version check FAILED"; exit 1; }
+
+          # Test logs endpoint
+          curl -fsS "http://127.0.0.1:5010/logs" > /dev/null && echo "Logs endpoint OK" || { echo "Logs endpoint FAILED"; exit 1; }
+
+          echo "All checks passed!"
 
       - name: Show launcher log
         if: always()
         shell: bash
         run: |
-          set +e
-          cat launcher.log
+          echo "=== Launcher log ==="
+          cat launcher.log 2>/dev/null || echo "(no launcher log)"
+          echo ""
+          echo "=== Setup log ==="
+          cat "$HOME/Library/Application Support/BOT Suivi Shopify/logs/setup.log" 2>/dev/null || echo "(no setup log)"
+          echo ""
+          echo "=== Server log ==="
+          cat "$HOME/Library/Application Support/BOT Suivi Shopify/logs/server.log" 2>/dev/null || echo "(no server log)"
 
       - name: Stop launcher
         if: always()
         shell: bash
         run: |
-          set +e
           if [[ -f launcher.pid ]]; then
-            kill "$(cat launcher.pid)" || true
+            kill "$(cat launcher.pid)" 2>/dev/null || true
           fi
-          pkill -f "shopify_pdf_bot_platform.py" || true
+          pkill -f "shopify_pdf_bot_platform.py" 2>/dev/null || true
